@@ -37,8 +37,26 @@ from dotenv import load_dotenv
 from rlm.clients import get_client
 from rlm.core.lm_handler import LMHandler
 from rlm.core.rlm import RLM
+from rlm.core.types import RLMIteration
 from rlm.environments.tool_repl import ToolREPL
-from rlm.utils.tool_prompts import RLM_TOOL_SYSTEM_PROMPT
+from rlm.utils.tool_prompts import build_tool_system_prompt
+
+
+def serialize_locals_preview(locals_dict: dict, max_len: int = 200) -> dict[str, str]:
+    """Serialize locals dict with truncated previews for IPC."""
+    result = {}
+    for k, v in locals_dict.items():
+        if k.startswith("_"):
+            continue
+        try:
+            repr_str = repr(v)
+            if len(repr_str) > max_len:
+                result[k] = repr_str[:max_len] + "..."
+            else:
+                result[k] = repr_str
+        except Exception:
+            result[k] = f"<{type(v).__name__}>"
+    return result
 
 
 class IPCToolREPL(ToolREPL):
@@ -67,6 +85,24 @@ def send_message(msg: dict[str, Any]):
     print(json.dumps(msg), flush=True)
 
 
+def format_conversation_history(history: list[dict[str, str]]) -> str:
+    """Format conversation history as a readable string for the prompt."""
+    if not history:
+        return ""
+    
+    parts = ["# Conversation History", 
+             "The following is the history of your conversation with the user in this session:\n"]
+    
+    for turn in history:
+        role = turn.get("role", "user")
+        content = turn.get("content", "")
+        role_label = "User" if role == "user" else "Assistant"
+        parts.append(f"**{role_label}:** {content}\n")
+    
+    parts.append("---\n")
+    return "\n".join(parts)
+
+
 def run_rlm_with_tools(config: dict[str, Any]) -> dict[str, Any]:
     """
     Run RLM with ToolREPL and return the result.
@@ -87,12 +123,53 @@ def run_rlm_with_tools(config: dict[str, Any]) -> dict[str, Any]:
     max_iterations = config.get("max_iterations", 30)
     api_key = config.get("api_key") or os.environ.get("ANTHROPIC_API_KEY")
     tool_definitions = config.get("tool_definitions", [])
+    conversation_history = config.get("conversation_history", [])
 
     if not prompt:
         return {"success": False, "error": "No prompt provided"}
 
     if not api_key:
         return {"success": False, "error": "No API key provided"}
+
+    # Prepend conversation history to prompt for session context
+    history_context = format_conversation_history(conversation_history)
+    if history_context:
+        prompt = f"{history_context}\n# Current Task\n{prompt}"
+
+    # Build system prompt with tool definitions included
+    system_prompt = build_tool_system_prompt(tool_definitions)
+
+    # Track iteration count for final result
+    iteration_count = 0
+
+    def on_iteration(iteration_num: int, iteration: RLMIteration) -> None:
+        """Emit progress event to TypeScript host."""
+        nonlocal iteration_count
+        iteration_count = iteration_num
+
+        # Collect code block info with variables
+        code_blocks_info = []
+        all_locals: dict[str, Any] = {}
+        for cb in iteration.code_blocks:
+            code_blocks_info.append({
+                "code_preview": cb.code[:300] if cb.code else "",
+                "stdout": cb.result.stdout[:500] if cb.result.stdout else "",
+                "stderr": cb.result.stderr[:200] if cb.result.stderr else "",
+                "locals": serialize_locals_preview(cb.result.locals) if cb.result.locals else {},
+            })
+            if cb.result.locals:
+                all_locals.update(cb.result.locals)
+
+        send_message({
+            "type": "progress",
+            "iteration": iteration_num,
+            "max_iterations": max_iterations,
+            "response_preview": iteration.response[:500] if iteration.response else "",
+            "code_blocks": code_blocks_info,
+            "variables": serialize_locals_preview(all_locals),
+            "has_final": iteration.final_answer is not None,
+            "iteration_time": iteration.iteration_time,
+        })
 
     # Create RLM instance with ToolREPL environment
     rlm = RLM(
@@ -106,8 +183,9 @@ def run_rlm_with_tools(config: dict[str, Any]) -> dict[str, Any]:
             "tool_definitions": tool_definitions,
         },
         max_iterations=max_iterations,
-        custom_system_prompt=RLM_TOOL_SYSTEM_PROMPT,
+        custom_system_prompt=system_prompt,
         verbose=False,
+        on_iteration=on_iteration,
     )
 
     try:
@@ -117,7 +195,7 @@ def run_rlm_with_tools(config: dict[str, Any]) -> dict[str, Any]:
         return {
             "success": True,
             "answer": result.response or "",
-            "iterations": 0,  # RLMChatCompletion doesn't track iterations directly
+            "iterations": iteration_count,
         }
     except Exception as e:
         import traceback

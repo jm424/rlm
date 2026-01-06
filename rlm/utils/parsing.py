@@ -22,22 +22,53 @@ def find_code_blocks(text: str) -> list[str]:
     return results
 
 
+def _extract_balanced_parens(text: str, start_pos: int) -> str | None:
+    """Extract content between balanced parentheses starting at start_pos.
+    
+    Args:
+        text: The full text
+        start_pos: Position of the opening '('
+        
+    Returns:
+        Content between the balanced parentheses, or None if unbalanced
+    """
+    if start_pos >= len(text) or text[start_pos] != '(':
+        return None
+    
+    depth = 0
+    start_content = start_pos + 1
+    for i in range(start_pos, len(text)):
+        if text[i] == '(':
+            depth += 1
+        elif text[i] == ')':
+            depth -= 1
+            if depth == 0:
+                return text[start_content:i]
+    return None  # Unbalanced
+
+
 def find_final_answer(text: str) -> tuple[str, str] | None:
     """
     Find FINAL(...) or FINAL_VAR(...) statement in response and return (type, content).
     Returns None if neither pattern is found.
+    
+    Uses balanced parenthesis matching to handle nested parens in the answer.
     """
     # Check for FINAL_VAR pattern first - must be at start of line
-    final_var_pattern = r"^\s*FINAL_VAR\((.*?)\)"
-    match = re.search(final_var_pattern, text, re.MULTILINE | re.DOTALL)
-    if match:
-        return ("FINAL_VAR", match.group(1).strip())
+    final_var_match = re.search(r"^\s*FINAL_VAR\(", text, re.MULTILINE)
+    if final_var_match:
+        paren_pos = text.find('(', final_var_match.start())
+        content = _extract_balanced_parens(text, paren_pos)
+        if content is not None:
+            return ("FINAL_VAR", content.strip())
 
     # Check for FINAL pattern - must be at start of line
-    final_pattern = r"^\s*FINAL\((.*?)\)"
-    match = re.search(final_pattern, text, re.MULTILINE | re.DOTALL)
-    if match:
-        return ("FINAL", match.group(1).strip())
+    final_match = re.search(r"^\s*FINAL\(", text, re.MULTILINE)
+    if final_match:
+        paren_pos = text.find('(', final_match.start())
+        content = _extract_balanced_parens(text, paren_pos)
+        if content is not None:
+            return ("FINAL", content.strip())
 
     return None
 

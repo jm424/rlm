@@ -1,4 +1,5 @@
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from typing import Any
 
@@ -51,6 +52,7 @@ class RLM:
         other_backend_kwargs: list[dict[str, Any]] | None = None,
         logger: RLMLogger | None = None,
         verbose: bool = False,
+        on_iteration: Callable[[int, "RLMIteration"], None] | None = None,
     ):
         """
         Args:
@@ -66,6 +68,7 @@ class RLM:
             other_backend_kwargs: The kwargs to pass to the other client backends (ordered to match other_backends).
             logger: The logger to use for the RLM.
             verbose: Whether to print verbose output in rich to console.
+            on_iteration: Optional callback invoked after each iteration with (iteration_num, iteration_data).
         """
         # Store config for spawning per-completion
         self.backend = backend
@@ -83,6 +86,7 @@ class RLM:
         self.system_prompt = custom_system_prompt if custom_system_prompt else RLM_SYSTEM_PROMPT
         self.logger = logger
         self.verbose = VerbosePrinter(enabled=verbose)
+        self.on_iteration = on_iteration
 
         # Log metadata if logger is provided
         if self.logger or verbose:
@@ -193,6 +197,10 @@ class RLM:
                     self.logger or self.verbose
                 )
                 iteration.final_answer = final_answer
+
+                # Invoke iteration callback if provided (for external progress tracking)
+                if self.on_iteration:
+                    self.on_iteration(i + 1, iteration)
 
                 # If logger is used, log the iteration.
                 if self.logger:

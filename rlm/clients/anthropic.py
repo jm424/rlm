@@ -42,9 +42,32 @@ class AnthropicClient(BaseLM):
         if system:
             kwargs["system"] = system
 
-        response = self.client.messages.create(**kwargs)
-        self._track_cost(response, model)
-        return response.content[0].text
+        # Use streaming to avoid timeout issues with long requests
+        full_text = ""
+        input_tokens = 0
+        output_tokens = 0
+
+        with self.client.messages.stream(**kwargs) as stream:
+            for event in stream:
+                if hasattr(event, "type"):
+                    if event.type == "content_block_delta" and hasattr(event, "delta"):
+                        if hasattr(event.delta, "text"):
+                            full_text += event.delta.text
+                    elif event.type == "message_delta" and hasattr(event, "usage"):
+                        output_tokens = getattr(event.usage, "output_tokens", 0)
+                    elif event.type == "message_start" and hasattr(event, "message"):
+                        if hasattr(event.message, "usage"):
+                            input_tokens = getattr(event.message.usage, "input_tokens", 0)
+
+        # Track usage
+        self.model_call_counts[model] += 1
+        self.model_input_tokens[model] += input_tokens
+        self.model_output_tokens[model] += output_tokens
+        self.model_total_tokens[model] += input_tokens + output_tokens
+        self.last_prompt_tokens = input_tokens
+        self.last_completion_tokens = output_tokens
+
+        return full_text
 
     async def acompletion(
         self, prompt: str | list[dict[str, Any]], model: str | None = None

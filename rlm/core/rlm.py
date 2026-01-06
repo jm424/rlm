@@ -16,8 +16,8 @@ from rlm.core.types import (
 from rlm.environments import BaseEnv, get_environment
 from rlm.logger import RLMLogger, VerbosePrinter
 from rlm.utils.parsing import (
+    check_for_final_answer,
     find_code_blocks,
-    find_final_answer,
     format_iteration,
 )
 from rlm.utils.prompts import (
@@ -186,7 +186,12 @@ class RLM:
                 )
 
                 # Check if RLM is done and has a final answer.
-                final_answer = find_final_answer(iteration.response)
+                # Use check_for_final_answer to properly resolve FINAL_VAR
+                final_answer = check_for_final_answer(
+                    iteration.response, 
+                    environment, 
+                    self.logger or self.verbose
+                )
                 iteration.final_answer = final_answer
 
                 # If logger is used, log the iteration.

@@ -258,6 +258,12 @@ class RLM:
         """
         iter_start = time.perf_counter()
         response = lm_handler.completion(prompt)
+
+        # Get per-iteration token usage (this iteration's context window size)
+        last_usage = lm_handler.get_client().get_last_usage()
+        input_tokens = last_usage.total_input_tokens
+        output_tokens = last_usage.total_output_tokens
+
         code_block_strs = find_code_blocks(response)
         code_blocks = []
 
@@ -271,6 +277,8 @@ class RLM:
             response=response,
             code_blocks=code_blocks,
             iteration_time=iteration_time,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
         )
 
     def _default_answer(self, message_history: list[dict[str, Any]], lm_handler: LMHandler) -> str:

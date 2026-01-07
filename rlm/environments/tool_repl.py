@@ -29,12 +29,16 @@ class ToolREPL(LocalREPL):
     executed by the host process (e.g., letta-code).
     """
 
+    # Default threshold for auto-storing large tool outputs in variables
+    DEFAULT_TOOL_OUTPUT_THRESHOLD = 5000
+
     def __init__(
         self,
         lm_handler_address: tuple[str, int] | None = None,
         context_payload: dict | list | str | None = None,
         setup_code: str | None = None,
         tool_definitions: list[dict[str, Any]] | None = None,
+        tool_output_threshold: int | None = None,  # Chars before auto-storing in variable
         ipc_input=None,  # For testing: override stdin
         ipc_output=None,  # For testing: override stdout
         **kwargs,
@@ -46,6 +50,18 @@ class ToolREPL(LocalREPL):
 
         # Tool definitions (for documentation/validation)
         self.tool_definitions = tool_definitions or []
+
+        # Tool output threshold: constructor arg > env var > default
+        if tool_output_threshold is not None:
+            self.tool_output_threshold = tool_output_threshold
+        else:
+            import os
+            self.tool_output_threshold = int(
+                os.environ.get("RLM_TOOL_OUTPUT_THRESHOLD", self.DEFAULT_TOOL_OUTPUT_THRESHOLD)
+            )
+
+        # Counter for auto-generated variable names
+        self._tool_result_counter = 0
 
         # Track tool calls made during execution
         self._pending_tool_calls: list[dict[str, Any]] = []
@@ -93,6 +109,8 @@ class ToolREPL(LocalREPL):
 
         Returns:
             The tool's result as a string, or an error message if the tool failed.
+            Large results (> tool_output_threshold) are automatically stored in a
+            variable and a placeholder is returned to prevent context bloat.
 
         Example:
             content = tool("Read", {"file_path": "src/main.ts"})
@@ -135,6 +153,11 @@ class ToolREPL(LocalREPL):
 
                 if status == "error":
                     return f"Error: {result}"
+
+                # Auto-store large outputs in variables to prevent context bloat
+                if len(result) > self.tool_output_threshold:
+                    return self._store_large_result(name, result)
+
                 return result
 
             elif response.get("type") == "error":
@@ -145,6 +168,34 @@ class ToolREPL(LocalREPL):
                 return f"Error: {error_msg}"
 
             # Ignore other message types (might be progress updates, etc.)
+
+    def _store_large_result(self, tool_name: str, result: str) -> str:
+        """Store a large tool result in a variable and return a placeholder.
+
+        This prevents large tool outputs from entering stdout/message history
+        even if the model prints the result. The model should use llm_query()
+        to analyze the stored variable.
+
+        Args:
+            tool_name: Name of the tool that produced the result
+            result: The large result string to store
+
+        Returns:
+            A placeholder string indicating where the result is stored
+        """
+        self._tool_result_counter += 1
+        var_name = f"_tool_result_{self._tool_result_counter}"
+
+        # Store in locals so it's accessible in the REPL
+        self.locals[var_name] = result
+
+        # Return informative placeholder
+        size_kb = len(result) / 1024
+        return (
+            f"[Large output ({size_kb:.1f}KB) stored in variable '{var_name}'. "
+            f"Use llm_query() to analyze it, e.g.: "
+            f"llm_query(f\"Analyze this {tool_name} output: {{{var_name}}}\")]"
+        )
 
     def send_progress(self, iteration: int, code: str, output: str) -> None:
         """Send a progress update to the host process."""

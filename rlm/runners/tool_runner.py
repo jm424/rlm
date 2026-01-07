@@ -169,6 +169,9 @@ def run_rlm_with_tools(config: dict[str, Any]) -> dict[str, Any]:
             "variables": serialize_locals_preview(all_locals),
             "has_final": iteration.final_answer is not None,
             "iteration_time": iteration.iteration_time,
+            # Per-iteration token usage (context window size for this LLM call)
+            "input_tokens": iteration.input_tokens,
+            "output_tokens": iteration.output_tokens,
         })
 
     # Create RLM instance with ToolREPL environment
@@ -192,10 +195,18 @@ def run_rlm_with_tools(config: dict[str, Any]) -> dict[str, Any]:
         # Run the RLM completion
         result = rlm.completion(prompt)
 
+        # Extract usage summary for propagation to letta-code
+        usage_data = None
+        if result.usage_summary:
+            usage_data = result.usage_summary.to_dict()
+
         return {
             "success": True,
             "answer": result.response or "",
             "iterations": iteration_count,
+            "usage": usage_data,
+            "execution_time_ms": int(result.execution_time * 1000),
+            "root_model": result.root_model,
         }
     except Exception as e:
         import traceback
@@ -232,6 +243,9 @@ def main():
             "answer": result.get("answer", ""),
             "iterations": result.get("iterations", 0),
             "success": True,
+            "usage": result.get("usage"),
+            "execution_time_ms": result.get("execution_time_ms"),
+            "root_model": result.get("root_model"),
         })
     else:
         send_message({

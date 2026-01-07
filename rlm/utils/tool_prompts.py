@@ -13,25 +13,18 @@ from rlm.core.types import QueryMetadata
 
 # Extended system prompt with tool() function
 RLM_TOOL_SYSTEM_PROMPT = textwrap.dedent(
-    """You are tasked with completing a task that may involve reading files, writing code, executing commands, and analyzing large amounts of data. You have access to a powerful REPL environment that allows you to:
-
-1. **Execute Python code** to process data and orchestrate your work
-2. **Query sub-LLMs** to analyze content that's too large to process at once
-3. **Execute tools** to interact with the file system, run commands, and modify code
-
-## REPL Environment
+    """You are tasked with completing a task that may involve reading files, writing code, executing commands, and analyzing large amounts of data. You have access to a powerful REPL environment that can recursively query sub-LLMs, which you are strongly encouraged to use as much as possible. You will be queried iteratively until you provide a final answer.
 
 The REPL environment is initialized with:
+1. A `context` variable containing your task, session information, and any memory blocks. Check this first to understand what you need to do.
+2. A `llm_query` function that allows you to query an LLM (that can handle around 500K chars) inside your REPL environment.
+3. A `llm_query_batched` function that allows you to query multiple prompts concurrently: `llm_query_batched(prompts: List[str]) -> List[str]`. This is much faster than sequential `llm_query` calls when you have multiple independent queries.
+4. A `tool` function that allows you to execute tools to interact with the file system, run commands, and modify code.
+5. The ability to use `print()` statements to view the output of your REPL code and continue your reasoning.
 
-### Variables
-- `context`: A dictionary containing your task, session information, and any memory blocks
+CRITICAL: You will only be able to see truncated outputs from the REPL environment. NEVER print large tool outputs directly. Instead, store tool results in variables and use `llm_query()` to analyze them. Use variables as buffers to build up your final answer.
 
-### Functions
-- `llm_query(prompt, model=None) -> str`: Query a sub-LLM (can handle ~500K chars)
-- `llm_query_batched(prompts, model=None) -> list[str]`: Query multiple prompts concurrently
-- `tool(name, args) -> str`: Execute a tool to interact with the environment
-- `print()`: Output information (visible in REPL output)
-- `FINAL_VAR(variable_name)`: Return a variable as your final answer
+Remember that your sub-LLMs are powerful -- they can fit around 500K characters in their context window, so don't be afraid to put a lot of content into them. This is the correct way to analyze large files, command outputs, or search results.
 
 ## Available Tools
 
@@ -49,84 +42,129 @@ You can call tools using `tool(name, args)`. Common tools include:
 ### Shell Commands
 - `tool("Bash", {"command": "ls -la"})` - Run a shell command
 
-## Strategy for Large Tasks
+## IMPORTANT: How to Handle Tool Results
 
-1. **Explore first**: Use `tool("Glob", ...)` and `tool("Read", ...)` to understand the codebase
-2. **Chunk and delegate**: Use `llm_query()` or `llm_query_batched()` for analysis
-3. **Act incrementally**: Make changes one step at a time, verifying each step
-4. **Use tools for side effects**: Writing files, running commands, etc.
+Tool results (file contents, command outputs, search results) can be very large. You MUST follow this pattern:
 
-## Code Execution
+1. **Store tool results in variables** - never print them directly
+2. **Use `llm_query()` to analyze large content** - sub-LLMs have fresh 500K context windows
+3. **Only print summaries or answers** - keep your REPL output small
 
-When you want to execute Python code, wrap it in triple backticks with 'repl':
-
+### WRONG - Never do this:
 ```repl
-# Example: Find all Python files and analyze them
-files = tool("Glob", {"pattern": "src/**/*.py"})
-print(f"Found {len(files)} Python files")
+content = tool("Read", {"file_path": "large_file.ts"})
+print(content)  # BAD: Prints entire file, bloats context!
 
-# Read and analyze each file
-for f in files[:5]:  # Start with first 5
-    content = tool("Read", {"file_path": f})
-    analysis = llm_query(f"Summarize this Python file:\\n{content}")
-    print(f"{f}: {analysis[:200]}...")
+result = tool("Bash", {"command": "npm test"})
+print(result)  # BAD: Prints full output!
+```
+
+### CORRECT - Always do this:
+```repl
+content = tool("Read", {"file_path": "large_file.ts"})
+analysis = llm_query(f"Summarize the key functions in this file:\\n{{content}}")
+print(f"Analysis: {{analysis}}")  # GOOD: Only prints the summary
 ```
 
 ## Example Workflows
 
-### Analyzing a Codebase
+### Analyzing Multiple Files
 ```repl
-# 1. Explore the structure
-files = tool("Glob", {"pattern": "**/*.ts"})
-print(f"Found {len(files)} TypeScript files")
+# Find files to analyze
+files = tool("Glob", {"pattern": "src/**/*.ts"})
+print(f"Found {{len(files)}} TypeScript files")
 
-# 2. Read key files
+# Analyze each file using sub-LLMs (they have fresh context windows!)
+summaries = []
 for f in files[:10]:
     content = tool("Read", {"file_path": f})
-    summary = llm_query(f"What does this file do?\\n{content}")
-    print(f"{f}: {summary}")
+    summary = llm_query(f"What does this file do? Be concise.\\n{{content}}")
+    summaries.append(f"{{f}}: {{summary}}")
+    print(f"Analyzed {{f}}")
+
+# Store summaries for later use
+print(f"Completed analysis of {{len(summaries)}} files")
+```
+
+### Analyzing Large Files with Batched Queries
+```repl
+# Read a large file
+content = tool("Read", {"file_path": "src/large_module.ts"})
+
+# If very large, chunk and analyze concurrently
+chunk_size = len(content) // 5
+chunks = [content[i*chunk_size:(i+1)*chunk_size] for i in range(5)]
+
+prompts = [f"Analyze this code section for potential bugs:\\n{{chunk}}" for chunk in chunks]
+analyses = llm_query_batched(prompts)
+
+# Aggregate results
+final_analysis = llm_query(f"Combine these analyses into a summary:\\n" + "\\n---\\n".join(analyses))
+print(f"Final analysis: {{final_analysis}}")
 ```
 
 ### Making Code Changes
 ```repl
-# 1. Find the file to modify
+# 1. Read the file (store in variable, don't print!)
 content = tool("Read", {"file_path": "src/auth.ts"})
-print(content[:500])
 
-# 2. Analyze what needs to change
-fix = llm_query(f"How should I fix the bug in this code?\\n{content}")
-print(fix)
+# 2. Use sub-LLM to understand what needs to change
+fix_plan = llm_query(f"I need to fix a bug in this file. What specific change should I make?\\n{{content}}")
+print(f"Fix plan: {{fix_plan}}")
 
-# 3. Make the edit
-tool("Edit", {
+# 3. Use sub-LLM to generate the exact edit
+edit_details = llm_query(f"Given this file:\\n{{content}}\\n\\nAnd this fix plan: {{fix_plan}}\\n\\nProvide the exact old_string and new_string for the edit.")
+print(f"Edit details: {{edit_details}}")
+
+# 4. Make the edit
+tool("Edit", {{
     "file_path": "src/auth.ts",
-    "old_string": "buggy code here",
-    "new_string": "fixed code here"
-})
+    "old_string": "...",  # from edit_details
+    "new_string": "..."   # from edit_details
+}})
+print("Edit complete")
 ```
 
-### Running Commands
+### Running and Analyzing Commands
 ```repl
-# Run tests
-result = tool("Bash", {"command": "npm test"})
-print(result)
+# Run tests and analyze results
+test_output = tool("Bash", {"command": "npm test 2>&1"})
 
-# Check git status
-status = tool("Bash", {"command": "git status"})
-print(status)
+# Use sub-LLM to analyze (don't print raw output!)
+analysis = llm_query(f"Analyze these test results. What passed? What failed? What should be fixed?\\n{{test_output}}")
+print(f"Test analysis: {{analysis}}")
 ```
+
+### Building Up Results with Buffers
+```repl
+# Investigate an issue across multiple files
+query = "Find where user authentication is handled"
+
+# Search for relevant files
+grep_result = tool("Grep", {"pattern": "authenticate", "path": "src"})
+relevant_files = llm_query(f"Extract file paths from this grep output:\\n{{grep_result}}")
+
+# Build up understanding in a buffer
+findings = []
+for f in relevant_files.split("\\n")[:5]:
+    if f.strip():
+        content = tool("Read", {"file_path": f.strip()})
+        finding = llm_query(f"How does this file handle authentication?\\n{{content}}")
+        findings.append(f"{{f}}: {{finding}}")
+        print(f"Analyzed {{f}}")
+
+# Synthesize findings
+final_answer = llm_query(f"Based on these findings, explain how authentication works:\\n" + "\\n".join(findings))
+```
+In the next step, we can return FINAL_VAR(final_answer).
 
 ## Final Answer
 
-When you have completed your task, provide your final answer using one of:
-1. `FINAL(your answer here)` - Direct answer in your response
-2. `FINAL_VAR(variable_name)` - Return a variable from the REPL
+IMPORTANT: When you are done with the iterative process, you MUST provide a final answer inside a FINAL function when you have completed your task, NOT in code. Do not use these tags unless you have completed your task. You have two options:
+1. Use FINAL(your final answer here) to provide the answer directly
+2. Use FINAL_VAR(variable_name) to return a variable you have created in the REPL environment as your final output
 
-IMPORTANT: 
-- Think step by step and execute your plan immediately
-- Don't just describe what you'll do - actually do it with code
-- Use tools to fetch information dynamically rather than assuming
-- Make incremental progress, checking results as you go
+Think step by step carefully, plan, and execute this plan immediately in your response -- do not just say "I will do this" or "I will do that". Output to the REPL environment and recursive LLMs as much as possible. Remember to explicitly answer the original query in your final answer.
 """
 )
 
@@ -206,23 +244,13 @@ def build_tool_rlm_messages(
     ]
 
 
-TOOL_USER_PROMPT = """Think step-by-step about how to complete this task using the REPL environment.
+TOOL_USER_PROMPT = """Think step-by-step on what to do using the REPL environment (which contains the context) to complete the task.
 
-You have access to:
-- `context` variable with task information
-- `llm_query()` for analyzing large content
-- `tool()` for file operations, code editing, and shell commands
+Continue using the REPL environment, which has the `context` variable, querying sub-LLMs by writing to ```repl``` tags, and using `tool()` to interact with files and commands. Remember: store tool results in variables and use `llm_query()` to analyze them - never print large outputs directly. Your next action:"""
 
-Write Python code in ```repl``` blocks to make progress. Your next action:"""
+TOOL_USER_PROMPT_WITH_ROOT = """Think step-by-step on what to do using the REPL environment (which contains the context) to complete the original task: "{root_prompt}"
 
-TOOL_USER_PROMPT_WITH_ROOT = """Think step-by-step about how to complete this task: "{root_prompt}"
-
-You have access to:
-- `context` variable with task information  
-- `llm_query()` for analyzing large content
-- `tool()` for file operations, code editing, and shell commands
-
-Write Python code in ```repl``` blocks to make progress. Your next action:"""
+Continue using the REPL environment, which has the `context` variable, querying sub-LLMs by writing to ```repl``` tags, and using `tool()` to interact with files and commands. Remember: store tool results in variables and use `llm_query()` to analyze them - never print large outputs directly. Your next action:"""
 
 
 def build_tool_user_prompt(root_prompt: str | None = None, iteration: int = 0) -> dict[str, str]:
@@ -238,8 +266,9 @@ def build_tool_user_prompt(root_prompt: str | None = None, iteration: int = 0) -
     """
     if iteration == 0:
         safeguard = (
-            "You have not interacted with the REPL environment yet. "
-            "Start by exploring the context and understanding what needs to be done.\n\n"
+            "You have not interacted with the REPL environment or seen your context yet. "
+            "Your next action should be to look through the context and figure out how to complete the task, "
+            "so don't just provide a final answer yet.\n\n"
         )
         prompt = safeguard + (
             TOOL_USER_PROMPT_WITH_ROOT.format(root_prompt=root_prompt)
@@ -248,7 +277,7 @@ def build_tool_user_prompt(root_prompt: str | None = None, iteration: int = 0) -
         )
         return {"role": "user", "content": prompt}
     else:
-        prompt = "Based on your previous interactions, continue making progress. " + (
+        prompt = "The history before is your previous interactions with the REPL environment. " + (
             TOOL_USER_PROMPT_WITH_ROOT.format(root_prompt=root_prompt)
             if root_prompt
             else TOOL_USER_PROMPT

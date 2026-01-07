@@ -158,6 +158,9 @@ class RLMIteration:
     code_blocks: list[CodeBlock]
     final_answer: str | None = None
     iteration_time: float | None = None
+    # Per-iteration token usage (context window size for this LLM call)
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
     def to_dict(self):
         return {
@@ -166,6 +169,8 @@ class RLMIteration:
             "code_blocks": [code_block.to_dict() for code_block in self.code_blocks],
             "final_answer": self.final_answer,
             "iteration_time": self.iteration_time,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
         }
 
 
